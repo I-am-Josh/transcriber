@@ -8,8 +8,10 @@ as you say them; let go and the text is typed wherever your cursor is.
 ## Open it
 
 - **As an app:** open **Transcriber** from Applications, Launchpad or Spotlight.
-  A microphone icon appears in the menu bar with its status, *Edit word list…*
-  and *Quit*. Build or rebuild it with `./build_app.sh`.
+  It sits in the Dock (right-click → Quit, or Cmd+Q) and adds a microphone icon
+  to the menu bar with its status and *Edit word list…*. A message at the bottom
+  of the screen says when it's on. Build or rebuild it with `./build_app.sh`
+  (needs Xcode's command line tools for `clang`).
 - **From a terminal:** `uv run dictate.py` (Ctrl+C to quit).
 
 Run only one of them at a time, or everything is typed twice.

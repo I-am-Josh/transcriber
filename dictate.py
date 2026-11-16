@@ -9,6 +9,7 @@ import os
 import pathlib
 import queue
 import re
+import signal
 import subprocess
 import tempfile
 import threading
@@ -143,8 +144,10 @@ class Overlay:
         self.label.setTextColor_(AppKit.NSColor.whiteColor())
         self.label.setMaximumNumberOfLines_(2)
         view.addSubview_(self.label)
+        self.shown = 0
 
-    def show(self, text):
+    def show(self, text, marker="● "):
+        self.shown += 1
         if not self.panel.isVisible():
             screen = AppKit.NSScreen.mainScreen().visibleFrame()
             x = screen.origin.x + (screen.size.width - self.WIDTH) / 2
@@ -152,7 +155,13 @@ class Overlay:
             self.panel.orderFrontRegardless()
         if len(text) > PREVIEW_CHARS:
             text = "…" + text[-PREVIEW_CHARS:].lstrip()
-        self.label.setStringValue_("● " + text)
+        self.label.setStringValue_(marker + text)
+
+    def notice(self, text, seconds=3):
+        """Show a message, then hide it unless something newer replaced it."""
+        self.show(text, marker="")
+        token = self.shown
+        AppHelper.callLater(seconds, lambda: self.shown == token and self.hide())
 
     def hide(self):
         self.panel.orderOut_(None)
@@ -167,6 +176,26 @@ class MenuActions(AppKit.NSObject):
 
     def openAccessibility_(self, sender):
         subprocess.run(["open", ACCESSIBILITY_SETTINGS])
+
+
+class AppDelegate(AppKit.NSObject):
+    def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_windows):
+        # Opening the app again (Dock, Spotlight) while it runs: say it's on.
+        self.dictation.announce()
+        return False
+
+
+def build_main_menu(actions):
+    """The Transcriber menu at the top left, with Quit (Cmd+Q)."""
+    main = AppKit.NSMenu.alloc().init()
+    app_item = main.addItemWithTitle_action_keyEquivalent_("Transcriber", None, "")
+    menu = AppKit.NSMenu.alloc().initWithTitle_("Transcriber")
+    words = menu.addItemWithTitle_action_keyEquivalent_("Edit word list…", "editWords:", "")
+    words.setTarget_(actions)
+    menu.addItem_(AppKit.NSMenuItem.separatorItem())
+    menu.addItemWithTitle_action_keyEquivalent_("Quit Transcriber", "terminate:", "q")
+    app_item.setSubmenu_(menu)
+    return main
 
 
 class MenuBar:
@@ -210,6 +239,7 @@ class Dictation:
         self.overlay = overlay
         self.menu = menu
         self.recording = False
+        self.status = "Starting Transcriber…"
         self.events = queue.Queue()  # "start" / "stop"
         self.audio = queue.Queue()  # chunks from the microphone
 
@@ -235,6 +265,17 @@ class Dictation:
     def ui(self, method, *args):
         AppHelper.callAfter(method, *args)
 
+    def set_status(self, text, opens_settings=False, announce=True):
+        self.status = text
+        self.ui(self.menu.set_status, text, opens_settings)
+        if announce:
+            self.ui(self.announce)
+
+    # Main thread
+    def announce(self):
+        if not self.recording:
+            self.overlay.notice(self.status, seconds=4)
+
     def drain_audio(self):
         chunks = []
         while True:
@@ -246,11 +287,11 @@ class Dictation:
     # Worker thread
     def run(self):
         self.wait_for_accessibility()
-        self.ui(self.menu.set_status, "Loading…")
+        self.set_status("Starting Transcriber…")
         print("Loading model…", flush=True)
         model = from_pretrained(MODEL)
         transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm up
-        self.ui(self.menu.set_status, "Ready: hold Right Option and talk")
+        self.set_status("Transcriber is on. Hold Right Option and talk.")
         print("Ready. Hold Right Option and talk.", flush=True)
 
         while True:
@@ -305,7 +346,7 @@ class Dictation:
         """
         prompt = {HIServices.kAXTrustedCheckOptionPrompt: True}
         if not HIServices.AXIsProcessTrustedWithOptions(prompt):
-            self.ui(self.menu.set_status, "Allow Accessibility in System Settings…", True)
+            self.set_status("Turn on Transcriber in System Settings → Accessibility.", True)
             print(
                 "Needs Accessibility permission: System Settings → Privacy & Security →\n"
                 "Accessibility → turn on this app (Transcriber, or your terminal).",
@@ -323,16 +364,22 @@ class Dictation:
 
 
 def main():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)  # Ctrl+C quits at once
     app = AppKit.NSApplication.sharedApplication()
-    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)  # no Dock icon
+    app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)  # Dock icon
 
-    dictation = Dictation(Overlay(), MenuBar())
+    menu_bar = MenuBar()
+    dictation = Dictation(Overlay(), menu_bar)
+    delegate = AppDelegate.alloc().init()
+    delegate.dictation = dictation
+    app.setDelegate_(delegate)
+    app.setMainMenu_(build_main_menu(menu_bar.actions))
     threading.Thread(target=dictation.run, daemon=True).start()
 
     mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=dictation.on_audio)
     mic.start()
     try:
-        AppHelper.runEventLoop(installInterrupt=True)
+        AppHelper.runEventLoop()
     finally:
         mic.stop()
 
