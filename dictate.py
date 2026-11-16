@@ -2,7 +2,7 @@
 
 Hold Right Option and speak: a small box at the bottom of the screen shows the
 words as you say them. Let go and the text is typed wherever your cursor is.
-Run with:  uv run dictate.py
+Run with:  uv run dictate.py   (or open Transcriber.app, see build_app.sh)
 """
 
 import os
@@ -10,7 +10,6 @@ import pathlib
 import queue
 import re
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -159,11 +158,57 @@ class Overlay:
         self.panel.orderOut_(None)
 
 
+ACCESSIBILITY_SETTINGS = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+
+
+class MenuActions(AppKit.NSObject):
+    def editWords_(self, sender):
+        subprocess.run(["open", "-t", str(WORDS_FILE)])
+
+    def openAccessibility_(self, sender):
+        subprocess.run(["open", ACCESSIBILITY_SETTINGS])
+
+
+class MenuBar:
+    """Microphone icon in the menu bar: status, word list, quit."""
+
+    def __init__(self):
+        self.actions = MenuActions.alloc().init()
+        self.item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(
+            AppKit.NSVariableStatusItemLength
+        )
+        self.set_listening(False)
+
+        menu = AppKit.NSMenu.alloc().init()
+        menu.setAutoenablesItems_(False)
+        self.status = menu.addItemWithTitle_action_keyEquivalent_("Loading…", None, "")
+        self.status.setEnabled_(False)
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        words = menu.addItemWithTitle_action_keyEquivalent_("Edit word list…", "editWords:", "")
+        words.setTarget_(self.actions)
+        menu.addItem_(AppKit.NSMenuItem.separatorItem())
+        menu.addItemWithTitle_action_keyEquivalent_("Quit Transcriber", "terminate:", "q")
+        self.item.setMenu_(menu)
+
+    def set_listening(self, listening):
+        name = "mic.fill" if listening else "mic"
+        image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "Transcriber")
+        image.setTemplate_(True)
+        self.item.button().setImage_(image)
+
+    def set_status(self, text, opens_settings=False):
+        self.status.setTitle_(text)
+        self.status.setEnabled_(opens_settings)
+        self.status.setAction_("openAccessibility:" if opens_settings else None)
+        self.status.setTarget_(self.actions if opens_settings else None)
+
+
 class Dictation:
     """All MLX work happens on one worker thread; the main thread runs the UI."""
 
-    def __init__(self, overlay):
+    def __init__(self, overlay, menu):
         self.overlay = overlay
+        self.menu = menu
         self.recording = False
         self.events = queue.Queue()  # "start" / "stop"
         self.audio = queue.Queue()  # chunks from the microphone
@@ -180,9 +225,11 @@ class Dictation:
         down = bool(event.modifierFlags() & RIGHT_OPTION_FLAG)
         if down and not self.recording:
             self.recording = True
+            self.menu.set_listening(True)
             self.events.put("start")
         elif not down and self.recording:
             self.recording = False
+            self.menu.set_listening(False)
             self.events.put("stop")
 
     def ui(self, method, *args):
@@ -198,10 +245,13 @@ class Dictation:
 
     # Worker thread
     def run(self):
-        print("Loading model…")
+        self.wait_for_accessibility()
+        self.ui(self.menu.set_status, "Loading…")
+        print("Loading model…", flush=True)
         model = from_pretrained(MODEL)
         transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm up
-        print("Ready. Hold Right Option and talk. Ctrl+C to quit.")
+        self.ui(self.menu.set_status, "Ready: hold Right Option and talk")
+        print("Ready. Hold Right Option and talk.", flush=True)
 
         while True:
             if self.events.get() != "start":
@@ -245,41 +295,45 @@ class Dictation:
             self.ui(self.overlay.hide)
             if text:
                 type_text(text + " ")
-                print(f"[{time.time() - start:.2f}s] {text}")
+                print(f"[{time.time() - start:.2f}s] {text}", flush=True)
 
 
-def check_permissions():
-    """Without Accessibility, macOS hides key presses and blocks pasting."""
-    prompt = {HIServices.kAXTrustedCheckOptionPrompt: True}
-    if HIServices.AXIsProcessTrustedWithOptions(prompt):
-        return
-    app = os.environ.get("TERM_PROGRAM", "your terminal app").replace("Apple_Terminal", "Terminal")
-    print(
-        f"{app} needs Accessibility permission.\n"
-        f"  System Settings → Privacy & Security → Accessibility → turn on {app}\n"
-        f"  (also Input Monitoring, if {app} is listed there).\n"
-        f"Then quit {app} completely (Cmd+Q), reopen it, and run this again."
-    )
-    sys.exit(1)
+    def wait_for_accessibility(self):
+        """Without Accessibility, macOS hides key presses and blocks pasting.
+
+        Asks once (macOS shows its own prompt), then waits until it's allowed.
+        """
+        prompt = {HIServices.kAXTrustedCheckOptionPrompt: True}
+        if not HIServices.AXIsProcessTrustedWithOptions(prompt):
+            self.ui(self.menu.set_status, "Allow Accessibility in System Settings…", True)
+            print(
+                "Needs Accessibility permission: System Settings → Privacy & Security →\n"
+                "Accessibility → turn on this app (Transcriber, or your terminal).",
+                flush=True,
+            )
+            while not HIServices.AXIsProcessTrusted():
+                time.sleep(1)
+        self.ui(self.listen_for_hotkey)
+
+    # Main thread
+    def listen_for_hotkey(self):
+        self.monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+            AppKit.NSEventMaskFlagsChanged, self.on_flags_changed
+        )
 
 
 def main():
-    check_permissions()
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyAccessory)  # no Dock icon
 
-    dictation = Dictation(Overlay())
+    dictation = Dictation(Overlay(), MenuBar())
     threading.Thread(target=dictation.run, daemon=True).start()
 
     mic = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=dictation.on_audio)
     mic.start()
-    monitor = AppKit.NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-        AppKit.NSEventMaskFlagsChanged, dictation.on_flags_changed
-    )
     try:
         AppHelper.runEventLoop(installInterrupt=True)
     finally:
-        AppKit.NSEvent.removeMonitor_(monitor)
         mic.stop()
 
 

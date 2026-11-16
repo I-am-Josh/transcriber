@@ -2,17 +2,27 @@
 
 Private, offline hold-to-talk dictation for macOS, using NVIDIA Parakeet on Apple MLX.
 
-## Run
+Hold **Right Option** and talk. A box at the bottom of the screen shows the words
+as you say them; let go and the text is typed wherever your cursor is.
 
-    uv run dictate.py
+## Open it
 
-Hold **Right Option**, talk, let go. The text is typed wherever your cursor is.
+- **As an app:** open **Transcriber** from Applications, Launchpad or Spotlight.
+  A microphone icon appears in the menu bar with its status, *Edit word list…*
+  and *Quit*. Build or rebuild it with `./build_app.sh`.
+- **From a terminal:** `uv run dictate.py` (Ctrl+C to quit).
 
-## First-run permissions (System Settings → Privacy & Security)
+Run only one of them at a time, or everything is typed twice.
 
-Give the terminal app you run this from:
-- **Microphone**: to record
-- **Input Monitoring**: to see the Right Option key
-- **Accessibility**: to paste the text
+## Word list
 
-Restart the terminal after granting them.
+`words.txt` fixes words it gets wrong, one `what it writes -> what you want` per
+line (for example `Epen -> Eapen`). Changes apply to the next thing you say.
+
+## Permissions (first run)
+
+macOS asks for **Accessibility** (to see the key and paste) and **Microphone**.
+The app waits until Accessibility is on, so there's no need to reopen it.
+Rebuilding the app makes macOS ask again.
+
+The app logs to `~/Library/Logs/Transcriber.log`.
