@@ -5,12 +5,20 @@ Run with:  uv run dictate.py
 """
 
 import os
+import pathlib
 import queue
+import sys
 import subprocess
 import tempfile
 import time
 import wave
 
+# Once the model is downloaded, load it from disk without asking Hugging Face.
+_CACHE = pathlib.Path.home() / ".cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v3"
+if _CACHE.exists():
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+
+import HIServices
 import numpy as np
 import sounddevice as sd
 from parakeet_mlx import from_pretrained
@@ -57,7 +65,23 @@ def type_text(text):
     subprocess.run(["pbcopy"], input=old)
 
 
+def check_permissions():
+    """Without Accessibility, macOS hides key presses and blocks pasting."""
+    prompt = {HIServices.kAXTrustedCheckOptionPrompt: True}
+    if HIServices.AXIsProcessTrustedWithOptions(prompt):
+        return
+    app = os.environ.get("TERM_PROGRAM", "your terminal app").replace("Apple_Terminal", "Terminal")
+    print(
+        f"{app} needs Accessibility permission.\n"
+        f"  System Settings → Privacy & Security → Accessibility → turn on {app}\n"
+        f"  (also Input Monitoring, if {app} is listed there).\n"
+        f"Then quit {app} completely (Cmd+Q), reopen it, and run this again."
+    )
+    sys.exit(1)
+
+
 def main():
+    check_permissions()
     print("Loading model…")
     model = from_pretrained(MODEL)
     transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm up
