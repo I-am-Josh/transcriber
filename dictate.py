@@ -8,6 +8,7 @@ Run with:  uv run dictate.py
 import os
 import pathlib
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -29,6 +30,7 @@ import sounddevice as sd
 from parakeet_mlx import from_pretrained
 from PyObjCTools import AppHelper
 
+WORDS_FILE = pathlib.Path(__file__).with_name("words.txt")
 MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
 RIGHT_OPTION_KEYCODE = 61
 RIGHT_OPTION_FLAG = 0x40  # device-specific bit, so Left Option doesn't count
@@ -53,6 +55,30 @@ def speech_start(audio):
     loud = rms > SPEECH_LEVEL
     hits = np.flatnonzero(loud[:-1] & loud[1:])
     return max(0, hits[0] * FRAME - PRE_ROLL) if len(hits) else None
+
+
+def load_words():
+    """Read `wrong -> right` lines from words.txt."""
+    fixes = []
+    try:
+        lines = WORDS_FILE.read_text().splitlines()
+    except FileNotFoundError:
+        return fixes
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "->" not in line:
+            continue
+        wrong, right = (part.strip() for part in line.split("->", 1))
+        if wrong:
+            pattern = re.compile(r"(?<!\w)" + re.escape(wrong).replace(r"\ ", r"\s+") + r"(?!\w)", re.I)
+            fixes.append((pattern, right))
+    return fixes
+
+
+def fix_words(text, fixes):
+    for pattern, right in fixes:
+        text = pattern.sub(right, text)
+    return text
 
 
 def write_wav(path, audio):
@@ -181,6 +207,7 @@ class Dictation:
             if self.events.get() != "start":
                 continue
             self.ui(self.overlay.show, "Listening…")
+            fixes = load_words()
             heard = np.zeros(0, dtype=np.float32)
             onset = None  # where speech starts in `heard`
             fed = 0  # how much of `heard` the live preview has seen
@@ -203,7 +230,7 @@ class Dictation:
                     if not stopping:
                         stream.add_audio(mx.array(heard[fed:]))
                         fed = len(heard)
-                        live = stream.result.text.strip()
+                        live = fix_words(stream.result.text.strip(), fixes)
                         if live:
                             self.ui(self.overlay.show, live)
 
@@ -214,7 +241,7 @@ class Dictation:
             # One full pass over the whole recording is a little more accurate
             # than the live preview.
             start = time.time()
-            text = transcribe(model, audio)
+            text = fix_words(transcribe(model, audio), fixes)
             self.ui(self.overlay.hide)
             if text:
                 type_text(text + " ")

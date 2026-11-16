@@ -1,0 +1,8 @@
+# Words the transcriber gets wrong, one per line:
+#   what it writes -> what you want
+# Matching ignores capitals and only swaps whole words. Saved changes apply to
+# the next thing you say; no restart needed.
+
+Epen -> Eapen
+Chat GPT -> ChatGPT
+Chat G P T -> ChatGPT
