@@ -10,11 +10,11 @@ import pathlib
 import queue
 import re
 import signal
+import sys
 import subprocess
-import tempfile
 import threading
+import traceback
 import time
-import wave
 
 # Once the model is downloaded, load it from disk without asking Hugging Face.
 _CACHE = pathlib.Path.home() / ".cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v3"
@@ -28,6 +28,7 @@ import Quartz
 import numpy as np
 import sounddevice as sd
 from parakeet_mlx import from_pretrained
+from parakeet_mlx.audio import get_logmel
 from PyObjCTools import AppHelper
 
 WORDS_FILE = pathlib.Path(__file__).with_name("words.txt")
@@ -81,23 +82,10 @@ def fix_words(text, fixes):
     return text
 
 
-def write_wav(path, audio):
-    pcm = (np.clip(audio, -1, 1) * 32767).astype(np.int16)
-    with wave.open(path, "wb") as f:
-        f.setnchannels(1)
-        f.setsampwidth(2)
-        f.setframerate(SAMPLE_RATE)
-        f.writeframes(pcm.tobytes())
-
-
 def transcribe(model, audio):
-    fd, path = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-    try:
-        write_wav(path, audio)
-        return model.transcribe(path).text.strip()
-    finally:
-        os.remove(path)
+    """Same as model.transcribe(file), but straight from memory, so no ffmpeg."""
+    mel = get_logmel(mx.array(audio, dtype=mx.float32), model.preprocessor_config)
+    return model.generate(mel)[0].text.strip()
 
 
 def type_text(text):
@@ -286,6 +274,14 @@ class Dictation:
 
     # Worker thread
     def run(self):
+        try:
+            self.work()
+        except Exception:
+            traceback.print_exc()
+            sys.stderr.flush()
+            self.set_status("Transcriber stopped because of an error. Quit and open it again.")
+
+    def work(self):
         self.wait_for_accessibility()
         self.set_status("Starting Transcriber…")
         print("Loading model…", flush=True)
