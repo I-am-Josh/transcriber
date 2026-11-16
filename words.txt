@@ -4,5 +4,5 @@
 # the next thing you say; no restart needed.
 
 Epen -> Eapen
-Chat GPT -> ChatGPT
-Chat G P T -> ChatGPT
+Clawed -> Claude
+Claud -> Claude
