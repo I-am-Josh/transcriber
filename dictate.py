@@ -40,7 +40,6 @@ FN_FLAG = AppKit.NSEventModifierFlagFunction
 SAMPLE_RATE = 16_000
 MIN_SECONDS = 0.3  # ignore accidental taps
 LIVE_EVERY = 0.25  # seconds between live updates
-PREVIEW_CHARS = 110
 WAVE_BARS = 20
 WAVE_EVERY = 1 / 24  # seconds per bar; the bars cover the last ~0.8 s
 # Seconds to keep the speech model (~1.2 GB) in memory after you finish talking.
@@ -149,8 +148,10 @@ class WaveView(AppKit.NSView):
 class Overlay:
     """A floating box at the bottom of the screen that never takes focus."""
 
-    WIDTH, HEIGHT = 640, 64
+    WIDTH, HEIGHT = 640, 64  # smallest size; it grows to fit the text
     PAD, WAVE_WIDTH = 18, 70
+    MARGIN = 40  # gap to the screen edges once it's as wide as it gets
+    MAX_HEIGHT = 0.6  # of the screen; past this the oldest words scroll off
 
     def __init__(self):
         style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
@@ -171,7 +172,7 @@ class Overlay:
         view = self.panel.contentView()
         view.setWantsLayer_(True)
         view.layer().setCornerRadius_(10)
-        view.layer().setBackgroundColor_(Quartz.CGColorCreateGenericGray(0.08, 0.9))
+        view.layer().setBackgroundColor_(Quartz.CGColorCreateGenericGray(0.08, 0.97))
 
         self.wave = WaveView.alloc().initWithFrame_(
             ((self.PAD, (self.HEIGHT - 32) / 2), (self.WAVE_WIDTH, 32))
@@ -180,28 +181,50 @@ class Overlay:
         view.addSubview_(self.wave)
 
         self.label = AppKit.NSTextField.wrappingLabelWithString_("")
-        self.label.setFont_(AppKit.NSFont.systemFontOfSize_(15))
-        self.label.setTextColor_(AppKit.NSColor.whiteColor())
-        self.label.setMaximumNumberOfLines_(2)
+        self.label.setMaximumNumberOfLines_(0)
         view.addSubview_(self.label)
         self.shown = 0
         self.timer = None
 
-    def show(self, text):
+    @staticmethod
+    def styled(text, draft=""):
+        """White text, then `draft` (words that may still change) in grey."""
+        font = AppKit.NSFont.systemFontOfSize_(15)
+        out = AppKit.NSMutableAttributedString.alloc().init()
+        for part, alpha in ((text, 1.0), (draft, 0.45)):
+            if part:
+                if out.length():
+                    part = " " + part
+                color = AppKit.NSColor.whiteColor().colorWithAlphaComponent_(alpha)
+                out.appendAttributedString_(
+                    AppKit.NSAttributedString.alloc().initWithString_attributes_(
+                        part, {AppKit.NSFontAttributeName: font, AppKit.NSForegroundColorAttributeName: color}
+                    )
+                )
+        return out
+
+    def show(self, text, draft=""):
+        """Show all the text: the box widens up to the screen edges, then grows taller."""
         self.shown += 1
-        if not self.panel.isVisible():
-            screen = AppKit.NSScreen.mainScreen().visibleFrame()
-            x = screen.origin.x + (screen.size.width - self.WIDTH) / 2
-            self.panel.setFrameOrigin_((x, screen.origin.y + 60))
-            self.panel.orderFrontRegardless()
-        if len(text) > PREVIEW_CHARS:
-            text = "…" + text[-PREVIEW_CHARS:].lstrip()
-        self.label.setStringValue_(text)
-        # Centre the text vertically, to the right of the waves when they show.
+        screen = AppKit.NSScreen.mainScreen().visibleFrame()
         left = self.PAD + (0 if self.wave.isHidden() else self.WAVE_WIDTH + 14)
-        width = self.WIDTH - left - self.PAD
-        height = min(self.HEIGHT - 20, self.label.cell().cellSizeForBounds_(((0, 0), (width, 1000))).height)
-        self.label.setFrame_(((left, (self.HEIGHT - height) / 2), (width, height)))
+        cell = self.label.cell()
+        while True:
+            self.label.setAttributedStringValue_(self.styled(text, draft))
+            one_line = cell.cellSizeForBounds_(((0, 0), (1e5, 1e5))).width
+            width = min(max(self.WIDTH, left + one_line + self.PAD + 4), screen.size.width - 2 * self.MARGIN)
+            text_width = width - left - self.PAD
+            text_height = cell.cellSizeForBounds_(((0, 0), (text_width, 1e5))).height
+            if text_height + 2 * self.PAD <= screen.size.height * self.MAX_HEIGHT or len(text.split()) < 2:
+                break
+            text = "…" + " ".join(text.split()[max(1, len(text.split()) // 10):])
+        height = max(self.HEIGHT, text_height + 2 * self.PAD)
+        x = screen.origin.x + (screen.size.width - width) / 2
+        self.panel.setFrame_display_(((x, screen.origin.y + 60), (width, height)), True)
+        self.label.setFrame_(((left, (height - text_height) / 2), (text_width, text_height)))
+        self.wave.setFrameOrigin_((self.PAD, height - (self.HEIGHT + 32) / 2))  # level with the first line
+        if not self.panel.isVisible():
+            self.panel.orderFrontRegardless()
 
     def listen(self, take_level):
         """Show moving waves while you hold fn; take_level() is the loudness since last call."""
