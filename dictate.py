@@ -27,6 +27,7 @@ import HIServices
 import mlx.core as mx
 import Quartz
 import numpy as np
+import objc
 import sounddevice as sd
 from parakeet_mlx import from_pretrained
 from parakeet_mlx.audio import get_logmel
@@ -40,6 +41,8 @@ SAMPLE_RATE = 16_000
 MIN_SECONDS = 0.3  # ignore accidental taps
 LIVE_EVERY = 0.25  # seconds between live updates
 PREVIEW_CHARS = 110
+WAVE_BARS = 20
+WAVE_EVERY = 1 / 24  # seconds per bar; the bars cover the last ~0.8 s
 # Seconds to keep the speech model (~1.2 GB) in memory after you finish talking.
 # 0 frees it straight away; it reloads in under a second next time you hold fn,
 # while the mic already records, so nothing you say is lost.
@@ -105,10 +108,49 @@ def type_text(text):
     subprocess.run(["pbcopy"], input=old)
 
 
+def loudness(rms):
+    """0..1 for the wave bars: room noise stays flat, loud speech fills them."""
+    db = 20 * np.log10(max(rms, 1e-6))
+    return min(1.0, max(0.0, (db + 55) / 40))
+
+
+class WaveView(AppKit.NSView):
+    """Bars that follow how loud you're talking, newest on the right."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(WaveView, self).initWithFrame_(frame)
+        if self is not None:
+            self.levels = [0.0] * WAVE_BARS
+        return self
+
+    @objc.python_method
+    def push(self, level):
+        self.levels = self.levels[1:] + [level]
+        self.setNeedsDisplay_(True)
+
+    @objc.python_method
+    def clear(self):
+        self.levels = [0.0] * WAVE_BARS
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, rect):
+        width, height = self.bounds().size
+        step = width / WAVE_BARS
+        bar = step * 0.6
+        AppKit.NSColor.whiteColor().set()
+        for i, level in enumerate(self.levels):
+            h = max(bar, level * height)
+            x = i * step + (step - bar) / 2
+            AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                ((x, (height - h) / 2), (bar, h)), bar / 2, bar / 2
+            ).fill()
+
+
 class Overlay:
     """A floating box at the bottom of the screen that never takes focus."""
 
-    WIDTH, HEIGHT = 560, 64
+    WIDTH, HEIGHT = 640, 64
+    PAD, WAVE_WIDTH = 18, 70
 
     def __init__(self):
         style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
@@ -131,15 +173,21 @@ class Overlay:
         view.layer().setCornerRadius_(10)
         view.layer().setBackgroundColor_(Quartz.CGColorCreateGenericGray(0.08, 0.9))
 
+        self.wave = WaveView.alloc().initWithFrame_(
+            ((self.PAD, (self.HEIGHT - 32) / 2), (self.WAVE_WIDTH, 32))
+        )
+        self.wave.setHidden_(True)
+        view.addSubview_(self.wave)
+
         self.label = AppKit.NSTextField.wrappingLabelWithString_("")
-        self.label.setFrame_(((18, 10), (self.WIDTH - 36, self.HEIGHT - 20)))
         self.label.setFont_(AppKit.NSFont.systemFontOfSize_(15))
         self.label.setTextColor_(AppKit.NSColor.whiteColor())
         self.label.setMaximumNumberOfLines_(2)
         view.addSubview_(self.label)
         self.shown = 0
+        self.timer = None
 
-    def show(self, text, marker="● "):
+    def show(self, text):
         self.shown += 1
         if not self.panel.isVisible():
             screen = AppKit.NSScreen.mainScreen().visibleFrame()
@@ -148,15 +196,39 @@ class Overlay:
             self.panel.orderFrontRegardless()
         if len(text) > PREVIEW_CHARS:
             text = "…" + text[-PREVIEW_CHARS:].lstrip()
-        self.label.setStringValue_(marker + text)
+        self.label.setStringValue_(text)
+        # Centre the text vertically, to the right of the waves when they show.
+        left = self.PAD + (0 if self.wave.isHidden() else self.WAVE_WIDTH + 14)
+        width = self.WIDTH - left - self.PAD
+        height = min(self.HEIGHT - 20, self.label.cell().cellSizeForBounds_(((0, 0), (width, 1000))).height)
+        self.label.setFrame_(((left, (self.HEIGHT - height) / 2), (width, height)))
+
+    def listen(self, take_level):
+        """Show moving waves while you hold fn; take_level() is the loudness since last call."""
+        self.wave.clear()
+        self.wave.setHidden_(False)
+        self.show("Listening…")
+        if self.timer is None:
+            self.timer = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
+                WAVE_EVERY, True, lambda timer: self.wave.push(loudness(take_level()))
+            )
+
+    def stop_waves(self):
+        if self.timer is not None:
+            self.timer.invalidate()
+            self.timer = None
+        self.wave.clear()
 
     def notice(self, text, seconds=3):
         """Show a message, then hide it unless something newer replaced it."""
-        self.show(text, marker="")
+        self.stop_waves()
+        self.wave.setHidden_(True)
+        self.show(text)
         token = self.shown
         AppHelper.callLater(seconds, lambda: self.shown == token and self.hide())
 
     def hide(self):
+        self.stop_waves()
         self.panel.orderOut_(None)
 
 
@@ -235,11 +307,19 @@ class Dictation:
         self.status = "Starting Transcriber…"
         self.events = queue.Queue()  # "start" / "stop"
         self.audio = queue.Queue()  # chunks from the microphone
+        self.level = 0.0  # loudest chunk since the waves last looked
 
     # Microphone thread
     def on_audio(self, indata, frames, t, status):
         if self.recording:
-            self.audio.put(indata[:, 0].copy())
+            chunk = indata[:, 0].copy()
+            self.audio.put(chunk)
+            self.level = max(self.level, float(np.sqrt(np.mean(chunk**2))))
+
+    # Main thread
+    def take_level(self):
+        level, self.level = self.level, 0.0
+        return level
 
     # Main thread
     def on_flags_changed(self, event):
@@ -249,10 +329,12 @@ class Dictation:
         if down and not self.recording:
             self.recording = True
             self.menu.set_listening(True)
+            self.overlay.listen(self.take_level)  # right away, even while the model loads
             self.events.put("start")
         elif not down and self.recording:
             self.recording = False
             self.menu.set_listening(False)
+            self.overlay.stop_waves()
             self.events.put("stop")
 
     def ui(self, method, *args):
@@ -307,7 +389,6 @@ class Dictation:
                 continue
             if event != "start":
                 continue
-            self.ui(self.overlay.show, "Listening…")
             if model is None:
                 model = from_pretrained(MODEL)  # the mic keeps recording meanwhile
             fixes = load_words()
