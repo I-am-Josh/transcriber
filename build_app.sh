@@ -32,7 +32,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Transcriber listens while you hold Right Option and turns your speech into text on this Mac.</string>
+  <string>Transcriber listens while you hold fn and turns your speech into text on this Mac.</string>
 </dict>
 </plist>
 EOF

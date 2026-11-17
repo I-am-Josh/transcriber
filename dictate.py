@@ -1,6 +1,6 @@
 """Hold-to-talk dictation that runs entirely on this Mac.
 
-Hold Right Option and speak: a small box at the bottom of the screen shows the
+Hold fn and speak: a small box at the bottom of the screen shows the
 words as you say them. Let go and the text is typed wherever your cursor is.
 Run with:  uv run dictate.py   (or open Transcriber.app, see build_app.sh)
 """
@@ -33,8 +33,8 @@ from PyObjCTools import AppHelper
 
 WORDS_FILE = pathlib.Path(__file__).with_name("words.txt")
 MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
-RIGHT_OPTION_KEYCODE = 61
-RIGHT_OPTION_FLAG = 0x40  # device-specific bit, so Left Option doesn't count
+FN_KEYCODE = 63  # the fn / Globe key
+FN_FLAG = AppKit.NSEventModifierFlagFunction
 SAMPLE_RATE = 16_000
 MIN_SECONDS = 0.3  # ignore accidental taps
 LIVE_EVERY = 0.25  # seconds between live updates
@@ -238,9 +238,9 @@ class Dictation:
 
     # Main thread
     def on_flags_changed(self, event):
-        if event.keyCode() != RIGHT_OPTION_KEYCODE:
+        if event.keyCode() != FN_KEYCODE:
             return
-        down = bool(event.modifierFlags() & RIGHT_OPTION_FLAG)
+        down = bool(event.modifierFlags() & FN_FLAG)
         if down and not self.recording:
             self.recording = True
             self.menu.set_listening(True)
@@ -287,8 +287,8 @@ class Dictation:
         print("Loading model…", flush=True)
         model = from_pretrained(MODEL)
         transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm up
-        self.set_status("Transcriber is on. Hold Right Option and talk.")
-        print("Ready. Hold Right Option and talk.", flush=True)
+        self.set_status("Transcriber is on. Hold fn and talk.")
+        print("Ready. Hold fn and talk.", flush=True)
 
         while True:
             if self.events.get() != "start":

@@ -2,8 +2,11 @@
 
 Private, offline hold-to-talk dictation for macOS, using NVIDIA Parakeet on Apple MLX.
 
-Hold **Right Option** and talk. A box at the bottom of the screen shows the words
+Hold **fn** and talk. A box at the bottom of the screen shows the words
 as you say them; let go and the text is typed wherever your cursor is.
+
+Set **System Settings → Keyboard → Press 🌐 key to** to **Do Nothing**, or macOS
+will also open emoji, Apple Dictation or switch input source when you press fn.
 
 ## Open it
 
