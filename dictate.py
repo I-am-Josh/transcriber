@@ -291,6 +291,8 @@ class Dictation:
         print("Ready. Hold fn and talk.", flush=True)
 
         while True:
+            # Hand back MLX's spare scratch memory (~0.8 GB) while idle.
+            mx.clear_cache()
             if self.events.get() != "start":
                 continue
             self.ui(self.overlay.show, "Listening…")
