@@ -95,6 +95,19 @@ def transcribe(model, audio):
     return model.generate(mel)[0].text.strip()
 
 
+def same_word(a, b):
+    return re.sub(r"\W", "", a.lower()) == re.sub(r"\W", "", b.lower())
+
+
+def lock_agreed(locked, previous, words):
+    """Words that came out the same in two passes in a row get locked, so the
+    live preview stops rewriting them; only the newest words stay unsure."""
+    k = 0
+    while k < min(len(words), len(previous)) and same_word(words[k], previous[k]):
+        k += 1
+    return locked + words[len(locked) : k] if k > len(locked) else locked
+
+
 def type_text(text):
     """Paste text at the cursor, then put the old clipboard back."""
     old = subprocess.run(["pbpaste"], capture_output=True).stdout
@@ -407,7 +420,7 @@ class Dictation:
                 timeout = KEEP_MODEL_LOADED if model is not None else None
                 event = self.events.get(timeout=timeout)
             except queue.Empty:
-                model = stream = None  # free the model until the next time you talk
+                model = None  # free the model until the next time you talk
                 gc.collect()
                 continue
             if event != "start":
@@ -417,29 +430,35 @@ class Dictation:
             fixes = load_words()
             heard = np.zeros(0, dtype=np.float32)
             onset = None  # where speech starts in `heard`
-            fed = 0  # how much of `heard` the live preview has seen
-            with model.transcribe_stream(context_size=(256, 256)) as stream:
-                stopping = False
-                while not stopping:
-                    try:
-                        stopping = self.events.get(timeout=LIVE_EVERY) == "stop"
-                    except queue.Empty:
-                        pass
-                    chunks = self.drain_audio()
-                    if not chunks:
-                        continue
-                    heard = np.concatenate([heard, *chunks])
+            locked, previous = [], []  # live preview: settled words, last pass
+            stopping = False
+            while not stopping:
+                try:
+                    stopping = self.events.get(timeout=LIVE_EVERY) == "stop"
+                except queue.Empty:
+                    pass
+                chunks = self.drain_audio()
+                if not chunks:
+                    continue
+                heard = np.concatenate([heard, *chunks])
+                if onset is None:
+                    onset = speech_start(heard)
                     if onset is None:
-                        onset = speech_start(heard)
-                        if onset is None:
-                            continue
-                        fed = onset
-                    if not stopping:
-                        stream.add_audio(mx.array(heard[fed:]))
-                        fed = len(heard)
-                        live = fix_words(stream.result.text.strip(), fixes)
-                        if live:
-                            self.ui(self.overlay.show, live)
+                        continue
+                if stopping or len(heard) - onset < MIN_SECONDS * SAMPLE_RATE:
+                    continue
+                # Re-read everything said so far, the same way as the final pass,
+                # so the preview matches what gets typed.
+                words = transcribe(model, heard[onset:]).split()
+                locked = lock_agreed(locked, previous, words)
+                previous = words
+                draft = words[len(locked) :]
+                if words:
+                    self.ui(
+                        self.overlay.show,
+                        fix_words(" ".join(locked), fixes),
+                        fix_words(" ".join(draft), fixes),
+                    )
 
             audio = heard[onset:] if onset is not None else heard[:0]
             if len(audio) < MIN_SECONDS * SAMPLE_RATE:
