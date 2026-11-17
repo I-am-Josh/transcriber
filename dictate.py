@@ -450,6 +450,9 @@ class Dictation:
                 # Re-read everything said so far, the same way as the final pass,
                 # so the preview matches what gets typed.
                 words = transcribe(model, heard[onset:]).split()
+                # Each pass has a new length, so MLX can't reuse its scratch
+                # buffers; without this they pile up (3 GB after 10 s of talking).
+                mx.clear_cache()
                 locked = lock_agreed(locked, previous, words)
                 previous = words
                 draft = words[len(locked) :]
