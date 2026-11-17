@@ -6,7 +6,6 @@ Run with:  uv run dictate.py   (or open Transcriber.app, see build_app.sh)
 """
 
 import gc
-import os
 import pathlib
 import queue
 import re
@@ -17,11 +16,6 @@ import threading
 import traceback
 import time
 
-# Once the model is downloaded, load it from disk without asking Hugging Face.
-_CACHE = pathlib.Path.home() / ".cache/huggingface/hub/models--mlx-community--parakeet-tdt-0.6b-v3"
-if _CACHE.exists():
-    os.environ.setdefault("HF_HUB_OFFLINE", "1")
-
 import AppKit
 import HIServices
 import mlx.core as mx
@@ -29,12 +23,18 @@ import Quartz
 import numpy as np
 import objc
 import sounddevice as sd
+from huggingface_hub import snapshot_download
 from parakeet_mlx import from_pretrained
 from parakeet_mlx.audio import get_logmel
 from PyObjCTools import AppHelper
 
 WORDS_FILE = pathlib.Path(__file__).with_name("words.txt")
-MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
+# Pick one in the menu bar icon → Model; the choice is remembered.
+MODELS = {
+    "accurate": ("mlx-community/parakeet-tdt-0.6b-v3", "Accurate: 25 languages (1.2 GB)"),
+    "light": ("mlx-community/parakeet-tdt_ctc-110m", "Light: English only (240 MB)"),
+}
+SETTINGS = AppKit.NSUserDefaults.alloc().initWithSuiteName_("local.transcriber")
 FN_KEYCODE = 63  # the fn / Globe key
 FN_FLAG = AppKit.NSEventModifierFlagFunction
 SAMPLE_RATE = 16_000
@@ -66,6 +66,24 @@ def speech_start(audio):
     loud = rms > SPEECH_LEVEL
     hits = np.flatnonzero(loud[:-1] & loud[1:])
     return max(0, hits[0] * FRAME - PRE_ROLL) if len(hits) else None
+
+
+def chosen_model():
+    key = SETTINGS.stringForKey_("model")
+    return key if key in MODELS else "accurate"
+
+
+def downloaded(key):
+    """The model's folder on disk, or None if it hasn't been downloaded yet."""
+    try:
+        return snapshot_download(MODELS[key][0], local_files_only=True)
+    except Exception:
+        return None
+
+
+def load_model(key):
+    """From disk without asking the internet once downloaded; else download it."""
+    return from_pretrained(downloaded(key) or MODELS[key][0])
 
 
 def load_words():
@@ -326,6 +344,11 @@ class MenuActions(AppKit.NSObject):
     def openAccessibility_(self, sender):
         subprocess.run(["open", ACCESSIBILITY_SETTINGS])
 
+    def chooseModel_(self, sender):
+        SETTINGS.setObject_forKey_(sender.representedObject(), "model")
+        self.menu_bar.show_model()
+        self.dictation.events.put("switch")  # downloads it now if it's new
+
 
 class AppDelegate(AppKit.NSObject):
     def applicationShouldHandleReopen_hasVisibleWindows_(self, app, has_windows):
@@ -364,9 +387,25 @@ class MenuBar:
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
         words = menu.addItemWithTitle_action_keyEquivalent_("Edit word list…", "editWords:", "")
         words.setTarget_(self.actions)
+
+        model_item = menu.addItemWithTitle_action_keyEquivalent_("Model", None, "")
+        models = AppKit.NSMenu.alloc().initWithTitle_("Model")
+        self.model_items = {}
+        for key, (_, label) in MODELS.items():
+            item = models.addItemWithTitle_action_keyEquivalent_(label, "chooseModel:", "")
+            item.setTarget_(self.actions)
+            item.setRepresentedObject_(key)
+            self.model_items[key] = item
+        model_item.setSubmenu_(models)
+        self.show_model()
+
         menu.addItem_(AppKit.NSMenuItem.separatorItem())
         menu.addItemWithTitle_action_keyEquivalent_("Quit Transcriber", "terminate:", "q")
         self.item.setMenu_(menu)
+
+    def show_model(self):
+        for key, item in self.model_items.items():
+            item.setState_(AppKit.NSControlStateValueOn if key == chosen_model() else AppKit.NSControlStateValueOff)
 
     def set_listening(self, listening):
         name = "mic.fill" if listening else "mic"
@@ -464,11 +503,7 @@ class Dictation:
     def work(self):
         self.wait_for_accessibility()
         self.set_status("Starting Transcriber…")
-        print("Loading model…", flush=True)
-        model = from_pretrained(MODEL)  # downloads it the first time
-        transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # check it works
-        self.set_status("Transcriber is on. Hold fn and talk.")
-        print("Ready. Hold fn and talk.", flush=True)
+        model, loaded = self.prepare(chosen_model())
 
         while True:
             # Hand back MLX's spare scratch memory (~0.8 GB) while idle.
@@ -480,10 +515,19 @@ class Dictation:
                 model = None  # free the model until the next time you talk
                 gc.collect()
                 continue
+            if event == "switch":
+                model = None
+                gc.collect()
+                mx.clear_cache()
+                model, loaded = self.prepare(chosen_model())
+                continue
             if event != "start":
                 continue
-            if model is None:
-                model = from_pretrained(MODEL)  # the mic keeps recording meanwhile
+            if model is None or loaded != chosen_model():
+                model = None
+                gc.collect()
+                loaded = chosen_model()
+                model = load_model(loaded)  # the mic keeps recording meanwhile
             fixes = load_words()
             heard = np.zeros(0, dtype=np.float32)
             onset = None  # where speech starts in `heard`
@@ -536,6 +580,20 @@ class Dictation:
                 print(f"[{time.time() - start:.2f}s] {text}", flush=True)
 
 
+    def prepare(self, key):
+        """Load (downloading if needed) and check a model, saying what's happening."""
+        name = MODELS[key][1].split(":")[0]
+        if downloaded(key) is None:
+            self.set_status(f"Downloading the {name} model (one time only)…")
+        else:
+            self.set_status(f"Loading the {name} model…", announce=False)
+        print(f"Loading {MODELS[key][0]}…", flush=True)
+        model = load_model(key)
+        transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # check it works
+        self.set_status(f"Transcriber is on ({name} model). Hold fn and talk.")
+        print("Ready. Hold fn and talk.", flush=True)
+        return model, key
+
     def wait_for_accessibility(self):
         """Without Accessibility, macOS hides key presses and blocks pasting.
 
@@ -567,6 +625,8 @@ def main():
 
     menu_bar = MenuBar()
     dictation = Dictation(Overlay(), menu_bar)
+    menu_bar.actions.menu_bar = menu_bar
+    menu_bar.actions.dictation = dictation
     delegate = AppDelegate.alloc().init()
     delegate.dictation = dictation
     app.setDelegate_(delegate)
