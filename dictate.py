@@ -34,7 +34,7 @@ MODELS = {
     "accurate": ("mlx-community/parakeet-tdt-0.6b-v3", "Accurate: 25 languages (1.2 GB)"),
     "light": ("mlx-community/parakeet-tdt_ctc-110m", "Light: English only (240 MB)"),
 }
-SETTINGS = AppKit.NSUserDefaults.alloc().initWithSuiteName_("local.transcriber")
+SETTINGS = AppKit.NSUserDefaults.alloc().initWithSuiteName_("local.transcriber.settings")  # not the app's own id: macOS refuses that
 FN_KEYCODE = 63  # the fn / Globe key
 FN_FLAG = AppKit.NSEventModifierFlagFunction
 SAMPLE_RATE = 16_000
