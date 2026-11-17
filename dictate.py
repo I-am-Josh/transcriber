@@ -95,6 +95,12 @@ def transcribe(model, audio):
     return model.generate(mel)[0].text.strip()
 
 
+def fn_held():
+    """Whether fn is physically down right now, whatever events we got."""
+    flags = Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateHIDSystemState)
+    return bool(flags & Quartz.kCGEventFlagMaskSecondaryFn)
+
+
 def same_word(a, b):
     return re.sub(r"\W", "", a.lower()) == re.sub(r"\W", "", b.lower())
 
@@ -361,13 +367,22 @@ class Dictation:
     def on_flags_changed(self, event):
         if event.keyCode() != FN_KEYCODE:
             return
-        down = bool(event.modifierFlags() & FN_FLAG)
-        if down and not self.recording:
+        if event.modifierFlags() & FN_FLAG:
+            self.press()
+        else:
+            self.release()
+
+    # Main thread
+    def press(self):
+        if not self.recording:
             self.recording = True
             self.menu.set_listening(True)
             self.overlay.listen(self.take_level)  # right away, even while the model loads
             self.events.put("start")
-        elif not down and self.recording:
+
+    # Main thread
+    def release(self):
+        if self.recording:
             self.recording = False
             self.menu.set_listening(False)
             self.overlay.stop_waves()
@@ -432,11 +447,18 @@ class Dictation:
             onset = None  # where speech starts in `heard`
             locked, previous = [], []  # live preview: settled words, last pass
             stopping = False
+            seen_fn = False  # only trust fn_held() once it has said yes
             while not stopping:
                 try:
                     stopping = self.events.get(timeout=LIVE_EVERY) == "stop"
                 except queue.Empty:
                     pass
+                # If macOS swallowed the key-up (it can, e.g. in password
+                # fields), stop anyway rather than record forever.
+                held = fn_held()
+                seen_fn = seen_fn or held
+                if not stopping and seen_fn and not held:
+                    self.ui(self.release)
                 chunks = self.drain_audio()
                 if not chunks:
                     continue
