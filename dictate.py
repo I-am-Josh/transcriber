@@ -5,6 +5,7 @@ words as you say them. Let go and the text is typed wherever your cursor is.
 Run with:  uv run dictate.py   (or open Transcriber.app, see build_app.sh)
 """
 
+import gc
 import os
 import pathlib
 import queue
@@ -39,6 +40,10 @@ SAMPLE_RATE = 16_000
 MIN_SECONDS = 0.3  # ignore accidental taps
 LIVE_EVERY = 0.25  # seconds between live updates
 PREVIEW_CHARS = 110
+# Seconds to keep the speech model (~1.2 GB) in memory after you finish talking.
+# 0 frees it straight away; it reloads in under a second next time you hold fn,
+# while the mic already records, so nothing you say is lost.
+KEEP_MODEL_LOADED = 0
 # Speech starts when two 50 ms frames in a row are louder than this. Silence and
 # the key's click make the model guess words like "yeah", so they're skipped.
 # Raise it if room noise still sneaks in; lower it if quiet speech is missed.
@@ -285,17 +290,26 @@ class Dictation:
         self.wait_for_accessibility()
         self.set_status("Starting Transcriber…")
         print("Loading model…", flush=True)
-        model = from_pretrained(MODEL)
-        transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # warm up
+        model = from_pretrained(MODEL)  # downloads it the first time
+        transcribe(model, np.zeros(SAMPLE_RATE, dtype=np.float32))  # check it works
         self.set_status("Transcriber is on. Hold fn and talk.")
         print("Ready. Hold fn and talk.", flush=True)
 
         while True:
             # Hand back MLX's spare scratch memory (~0.8 GB) while idle.
             mx.clear_cache()
-            if self.events.get() != "start":
+            try:
+                timeout = KEEP_MODEL_LOADED if model is not None else None
+                event = self.events.get(timeout=timeout)
+            except queue.Empty:
+                model = stream = None  # free the model until the next time you talk
+                gc.collect()
+                continue
+            if event != "start":
                 continue
             self.ui(self.overlay.show, "Listening…")
+            if model is None:
+                model = from_pretrained(MODEL)  # the mic keeps recording meanwhile
             fixes = load_words()
             heard = np.zeros(0, dtype=np.float32)
             onset = None  # where speech starts in `heard`
