@@ -6,3 +6,6 @@
 Epen -> Eapen
 Clawed -> Claude
 Claud -> Claude
+combos -> Convose
+Convos -> Convose
+condos -> Convose
