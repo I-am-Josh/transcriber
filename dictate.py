@@ -40,6 +40,9 @@ FN_FLAG = AppKit.NSEventModifierFlagFunction
 SAMPLE_RATE = 16_000
 MIN_SECONDS = 0.3  # ignore accidental taps
 LIVE_EVERY = 0.25  # seconds between live updates
+# The live preview re-reads only about this many seconds, so it doesn't slow
+# down as you keep talking. The final pass still reads the whole recording.
+LIVE_WINDOW = 10
 WAVE_BARS = 20
 WAVE_EVERY = 1 / 24  # seconds per bar; the bars cover the last ~0.8 s
 # Seconds to keep the speech model (~1.2 GB) in memory after you finish talking.
@@ -105,13 +108,52 @@ def same_word(a, b):
     return re.sub(r"\W", "", a.lower()) == re.sub(r"\W", "", b.lower())
 
 
-def lock_agreed(locked, previous, words):
-    """Words that came out the same in two passes in a row get locked, so the
-    live preview stops rewriting them; only the newest words stay unsure."""
-    k = 0
-    while k < min(len(words), len(previous)) and same_word(words[k], previous[k]):
-        k += 1
-    return locked + words[len(locked) : k] if k > len(locked) else locked
+def timed_words(model, audio, offset):
+    """[word, start, end] for each word, in seconds, `offset` added to the times."""
+    mel = get_logmel(mx.array(audio, dtype=mx.float32), model.preprocessor_config)
+    words = []
+    for token in model.generate(mel)[0].tokens:
+        if token.text.startswith(" ") or not words:
+            words.append([token.text.strip(), token.start + offset, token.end + offset])
+        else:
+            words[-1][0] += token.text
+            words[-1][2] = token.end + offset
+    return words
+
+
+class LivePreview:
+    """Words that come out the same in two passes in a row get locked, so the
+    preview stops rewriting them; only the newest words stay unsure (grey).
+    Each pass re-reads just the last LIVE_WINDOW seconds, plus a little before
+    the last locked word, so it stays quick however long you talk."""
+
+    def __init__(self):
+        self.locked = []  # settled words
+        self.locked_until = 0.0  # seconds into the speech where they end
+        self.previous = []  # last pass's words after the locked ones
+
+    def update(self, model, speech):
+        spoken = len(speech) / SAMPLE_RATE
+        start = max(0.0, min(spoken - LIVE_WINDOW, self.locked_until - 1.0))
+        words = timed_words(model, speech[int(start * SAMPLE_RATE) :], start)
+        # Skip words already locked (or cut off at the window's start). Their
+        # times shift a little between passes, so match the last locked words
+        # by text; fall back to time if they don't line up.
+        new = [w for w in words if (w[1] + w[2]) / 2 > self.locked_until - 0.4]
+        for j in range(min(len(new), len(self.locked), 5), 0, -1):
+            if all(same_word(a, b[0]) for a, b in zip(self.locked[-j:], new[:j])):
+                new = new[j:]
+                break
+        else:
+            new = [w for w in new if (w[1] + w[2]) / 2 > self.locked_until]
+        k = 0
+        while k < min(len(new), len(self.previous)) and same_word(new[k][0], self.previous[k][0]):
+            k += 1
+        if k:
+            self.locked += [w[0] for w in new[:k]]
+            self.locked_until = new[k - 1][2]
+        self.previous = new[k:]
+        return self.locked, [w[0] for w in new[k:]]
 
 
 def type_text(text):
@@ -445,7 +487,7 @@ class Dictation:
             fixes = load_words()
             heard = np.zeros(0, dtype=np.float32)
             onset = None  # where speech starts in `heard`
-            locked, previous = [], []  # live preview: settled words, last pass
+            preview = LivePreview()
             stopping = False
             seen_fn = False  # only trust fn_held() once it has said yes
             while not stopping:
@@ -469,16 +511,11 @@ class Dictation:
                         continue
                 if stopping or len(heard) - onset < MIN_SECONDS * SAMPLE_RATE:
                     continue
-                # Re-read everything said so far, the same way as the final pass,
-                # so the preview matches what gets typed.
-                words = transcribe(model, heard[onset:]).split()
+                locked, draft = preview.update(model, heard[onset:])
                 # Each pass has a new length, so MLX can't reuse its scratch
                 # buffers; without this they pile up (3 GB after 10 s of talking).
                 mx.clear_cache()
-                locked = lock_agreed(locked, previous, words)
-                previous = words
-                draft = words[len(locked) :]
-                if words:
+                if locked or draft:
                     self.ui(
                         self.overlay.show,
                         fix_words(" ".join(locked), fixes),
