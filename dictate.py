@@ -242,6 +242,7 @@ class Overlay:
     PAD, WAVE_WIDTH = 18, 70
     MARGIN = 40  # gap to the screen edges once it's as wide as it gets
     MAX_HEIGHT = 0.6  # of the screen; past this the oldest words scroll off
+    LIVE_WIDTH = 900  # live words keep this width so the text never slides sideways
 
     def __init__(self):
         style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
@@ -275,6 +276,7 @@ class Overlay:
         view.addSubview_(self.label)
         self.shown = 0
         self.timer = None
+        self.live = False  # True from listen() until hide() or notice()
 
     @staticmethod
     def styled(text, draft=""):
@@ -293,8 +295,10 @@ class Overlay:
                 )
         return out
 
-    def show(self, text, draft=""):
-        """Show all the text: the box widens up to the screen edges, then grows taller."""
+    def show(self, text, draft="", live=False):
+        """Show all the text. Short messages size the box to fit, up to the screen
+        edges; live words keep one steady width and only grow taller."""
+        live = live or self.live
         self.shown += 1
         screen = AppKit.NSScreen.mainScreen().visibleFrame()
         left = self.PAD + (0 if self.wave.isHidden() else self.WAVE_WIDTH + 14)
@@ -302,7 +306,10 @@ class Overlay:
         while True:
             self.label.setAttributedStringValue_(self.styled(text, draft))
             one_line = cell.cellSizeForBounds_(((0, 0), (1e5, 1e5))).width
-            width = min(max(self.WIDTH, left + one_line + self.PAD + 4), screen.size.width - 2 * self.MARGIN)
+            if live:
+                width = min(self.LIVE_WIDTH, screen.size.width - 2 * self.MARGIN)
+            else:
+                width = min(max(self.WIDTH, left + one_line + self.PAD + 4), screen.size.width - 2 * self.MARGIN)
             text_width = width - left - self.PAD
             text_height = cell.cellSizeForBounds_(((0, 0), (text_width, 1e5))).height
             if text_height + 2 * self.PAD <= screen.size.height * self.MAX_HEIGHT or len(text.split()) < 2:
@@ -320,7 +327,9 @@ class Overlay:
         """Show moving waves while you hold fn; take_level() is the loudness since last call."""
         self.wave.clear()
         self.wave.setHidden_(False)
+        self.live = False
         self.show("Listening…")
+        self.live = True  # words that follow keep a steady width
         if self.timer is None:
             self.timer = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                 WAVE_EVERY, True, lambda timer: self.wave.push(loudness(take_level()))
@@ -335,6 +344,7 @@ class Overlay:
     def notice(self, text, seconds=3):
         """Show a message, then hide it unless something newer replaced it."""
         self.stop_waves()
+        self.live = False
         self.wave.setHidden_(True)
         self.show(text)
         token = self.shown
@@ -342,6 +352,7 @@ class Overlay:
 
     def hide(self):
         self.stop_waves()
+        self.live = False
         self.panel.orderOut_(None)
 
 
@@ -575,6 +586,7 @@ class Dictation:
                         self.overlay.show,
                         fix_words(" ".join(locked), fixes),
                         fix_words(" ".join(draft), fixes),
+                        True,  # live: keep the box width steady
                     )
 
             audio = heard[onset:] if onset is not None else heard[:0]
