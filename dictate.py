@@ -139,6 +139,17 @@ def timed_words(model, audio, offset):
     return words
 
 
+def drop_guesses(words, spoken):
+    """When the audio stops mid-word, the model makes up an ending ("…is that
+    the next one is a good idea") and squeezes it into the last instant: words
+    that take no time at all. Real words last at least one 80 ms frame. Cut from
+    the first such word near the end, so made-up words never flash on screen."""
+    for i, (_, start, end) in enumerate(words):
+        if end - start < 0.01 and start > spoken - 1.0:
+            return words[:i]
+    return words
+
+
 class LivePreview:
     """Words that come out the same in two passes in a row get locked, so the
     preview stops rewriting them; only the newest words stay unsure (grey).
@@ -153,7 +164,7 @@ class LivePreview:
     def update(self, model, speech):
         spoken = len(speech) / SAMPLE_RATE
         start = max(0.0, min(spoken - LIVE_WINDOW, self.locked_until - 1.0))
-        words = timed_words(model, speech[int(start * SAMPLE_RATE) :], start)
+        words = drop_guesses(timed_words(model, speech[int(start * SAMPLE_RATE) :], start), spoken)
         # Skip words already locked (or cut off at the window's start). Their
         # times shift a little between passes, so match the last locked words
         # by text; fall back to time if they don't line up.
