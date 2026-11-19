@@ -9,3 +9,4 @@ Claud -> Claude
 combos -> Convose
 Convos -> Convose
 condos -> Convose
+ Judge Pt -> ChatGPT
