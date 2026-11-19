@@ -242,7 +242,7 @@ class Overlay:
     PAD, WAVE_WIDTH = 18, 70
     MARGIN = 40  # gap to the screen edges once it's as wide as it gets
     MAX_HEIGHT = 0.6  # of the screen; past this the oldest words scroll off
-    LIVE_WIDTH = 900  # live words keep this width so the text never slides sideways
+    LIVE_WIDTH = 1100  # the box keeps this width for the whole dictation, Listening… included
 
     def __init__(self):
         style = AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel
@@ -276,7 +276,7 @@ class Overlay:
         view.addSubview_(self.label)
         self.shown = 0
         self.timer = None
-        self.live = False  # True from listen() until hide() or notice()
+        self.live = False  # True from listen() until hide() or notice(): steady live width
 
     @staticmethod
     def styled(text, draft=""):
@@ -327,9 +327,8 @@ class Overlay:
         """Show moving waves while you hold fn; take_level() is the loudness since last call."""
         self.wave.clear()
         self.wave.setHidden_(False)
-        self.live = False
+        self.live = True  # the box opens at its steady width and keeps it
         self.show("Listening…")
-        self.live = True  # words that follow keep a steady width
         if self.timer is None:
             self.timer = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(
                 WAVE_EVERY, True, lambda timer: self.wave.push(loudness(take_level()))
